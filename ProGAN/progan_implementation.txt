@@ -1,0 +1,158 @@
+import numpy as np
+from keras.models import Sequential
+from keras.optimizers import Adam
+from keras.layers import Dense, Conv2D, Flatten, Dropout, LeakyReLU, Reshape, Conv2DTranspose
+from keras.utils import plot_model
+from keras.datasets.cifar10 import load_data
+import matplotlib.pyplot as plt
+
+# Load and preprocess the data
+(x_train, _), (_, _) = load_data()
+x_train = x_train.astype('float32')
+x_train = (x_train - 127.5) / 127.5
+
+# Define the Discriminator model
+def define_discriminator(in_shape=(32, 32, 3)):
+    model = Sequential([
+        Conv2D(64, (3, 3), padding='same', input_shape=in_shape),
+        LeakyReLU(alpha=0.2),
+        
+        Conv2D(128, (3, 3), padding='same', strides=(2, 2)),
+        LeakyReLU(alpha=0.2),
+        
+        Conv2D(128, (3, 3), padding='same', strides=(2, 2)),
+        LeakyReLU(alpha=0.2),
+        
+        Conv2D(256, (3, 3), padding='same', strides=(2, 2)),
+        LeakyReLU(alpha=0.2),
+        
+        Flatten(),
+        Dropout(0.4),
+        Dense(units=1, activation='sigmoid')
+    ])
+
+    optimizer = Adam(learning_rate=0.0002, beta_1=0.5)
+    model.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy'])
+
+    return model
+
+# Load real samples from the dataset
+def generate_real_samples(dataset, n_samples):
+    ix = np.random.randint(0, dataset.shape[0], n_samples)
+    X = dataset[ix]
+    y = np.ones((n_samples, 1))
+    return X, y
+
+# Generate fake samples using the generator model
+def generate_fake_samples(generator, latent_dim, n_samples):
+    x_input = np.random.randn(latent_dim * n_samples)
+    x_input = x_input.reshape(n_samples, latent_dim)
+    X = generator.predict(x_input)
+    y = np.zeros((n_samples, 1))
+    return X, y
+
+# Define the Generator model for ProGAN
+def define_generator(latent_dim):
+    model = Sequential([
+        Dense(units=256 * 4 * 4, input_dim=latent_dim),
+        LeakyReLU(alpha=0.2),
+        Reshape((4, 4, 256)),
+        
+        Conv2DTranspose(128, (4, 4), strides=(2, 2), padding='same'),
+        LeakyReLU(alpha=0.2),
+        
+        Conv2DTranspose(128, (4, 4), strides=(2, 2), padding='same'),
+        LeakyReLU(alpha=0.2),
+        
+        Conv2DTranspose(128, (4, 4), strides=(2, 2), padding='same'),
+        LeakyReLU(alpha=0.2),
+        
+        Conv2D(3, (3, 3), activation='tanh', padding='same')
+    ])
+    return model
+
+# Define the GAN model for ProGAN
+def define_gan(generator, discriminator):
+    discriminator.trainable = False
+    model = Sequential([
+        generator,
+        discriminator
+    ])
+    optimizer = Adam(learning_rate=0.0002, beta_1=0.5)
+    model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
+    return model
+
+# Train the ProGAN
+def train_progan(generator, discriminator, gan_model, dataset, latent_dim, n_epochs=200, n_batch=128):
+    batch_per_epoch = int(dataset.shape[0] / n_batch)
+    half_batch = int(n_batch / 2)
+
+    for i in range(n_epochs):
+        for j in range(batch_per_epoch):
+            # Train the discriminator on real samples
+            X_real, y_real = generate_real_samples(dataset, half_batch)
+            d_loss1, _ = discriminator.train_on_batch(X_real, y_real)
+
+            # Train the discriminator on fake samples
+            X_fake, y_fake = generate_fake_samples(generator, latent_dim, half_batch)
+            d_loss2, _ = discriminator.train_on_batch(X_fake, y_fake)
+
+            # Train the generator via the GAN model
+            X_gan = generate_latent_points(latent_dim, n_batch)
+            y_gan = np.ones((n_batch, 1))
+            g_loss = gan_model.train_on_batch(X_gan, y_gan)
+
+            print(f'>{i+1}, {j+1}/{batch_per_epoch}, d1={d_loss1}, d2={d_loss2}, g={g_loss}')
+
+        if (i + 1) % 10 == 0:
+            summarize_performance(i, generator, discriminator, dataset, latent_dim)
+
+# Summarize generator performance
+def summarize_performance(epoch, generator, discriminator, dataset, latent_dim, n_samples=25):
+    X_real, y_real = generate_real_samples(dataset, n_samples)
+    _, acc_real = discriminator.evaluate(X_real, y_real, verbose=0)
+
+    X_fake, y_fake = generate_fake_samples(generator, latent_dim, n_samples)
+    _, acc_fake = discriminator.evaluate(X_fake, y_fake, verbose=0)
+
+    print(f'>Accuracy: real={acc_real * 100}%, fake={acc_fake * 100}%')
+
+    save_plot(X_fake, epoch)
+
+    filename = f'generator_model_{epoch+1}.h5'
+    generator.save(filename)
+
+# Save generated images to file
+def save_plot(examples, epoch, n=5):
+    examples = (examples + 1) / 2.0
+
+    for i in range(n * n):
+        plt.subplot(n, n, i + 1)
+        plt.axis('off')
+        plt.imshow(examples[i])
+    filename = f'generator_model_{epoch + 1}.png'
+    plt.savefig(filename)
+    plt.close()
+
+# Generate latent points for the generator
+def generate_latent_points(latent_dim, n_samples):
+    x_input = np.random.randn(latent_dim * n_samples)
+    x_input = x_input.reshape(n_samples, latent_dim)
+    return x_input
+
+# Define and compile the discriminator
+d_model = define_discriminator()
+d_model.summary()
+
+# Define and compile the generator
+latent_dim = 100
+g_model = define_generator(latent_dim)
+g_model.summary()
+
+# Define and compile the GAN model
+gan_model = define_gan(g_model, d_model)
+gan_model.summary()
+
+# Train the ProGAN
+train_progan(g_model, d_model, gan_model, x_train, latent_dim, n_epochs=200, n_batch=128)
+
